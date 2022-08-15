@@ -1,0 +1,190 @@
+name: DeployTerraform
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: 5.0.100
+
+      - name: Install dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test --no-restore --verbosity normal
+
+      - name: Dotnet Publish
+        run: dotnet publish --configuration Release -o ${{ github.workspace }}/demo 
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v1
+        with:
+          name: app
+          path: ${{ github.workspace }}//demo
+
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v1
+        with:
+          name: terraform
+          path: ${{ github.workspace }}//appservice
+        
+  deploy-dev-infra:
+    name: Deploy Infra Dev
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/appservice
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.TF_ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.TF_ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.TF_ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.TF_ARM_TENNANT_ID }}
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.STORAGE_CONNSTRING }}    
+      
+      
+    environment:
+      name: dev
+    
+    needs: build
+    steps:
+      - name: Download Terraform
+        uses: actions/download-artifact@v2
+        with:
+          name: terraform
+          path: ${{ github.workspace }}//appservice
+          
+      - name: Download TF State
+        uses: azure/CLI@v1
+        with:
+          azcliversion: 2.0.72
+          inlineScript: |
+            az storage blob download-batch -d appservice --pattern terraform.tfstate -s ${{ secrets.CONTAINER_NAME }}     
+            
+      - uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -var "prefix=${{ secrets.RESOURCE_PREFIX }}" -lock=false
+        continue-on-error: true
+  
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -var "prefix=${{ secrets.RESOURCE_PREFIX }}" -lock=false
+  
+      - name: Upload TF State
+        uses: azure/CLI@v1
+        with:
+          azcliversion: 2.0.72
+          inlineScript: |
+            az storage blob upload-batch -d ${{ secrets.CONTAINER_NAME }} -s appservice --pattern *.tfstate
+  deploy-dev-app:
+     name: Deploy Dev App
+     runs-on: ubuntu-latest
+
+     environment:
+       name: dev 
+       
+     needs: deploy-dev-infra
+     steps:
+       - name: Download App
+         uses: actions/download-artifact@v2
+         with:
+           name: app
+           path: ${{ github.workspace }}//app
+
+       - name: Azure Login
+         uses: azure/login@v1
+         with:
+           creds: ${{ secrets.AZURE_CREDENTIALS }}
+            
+       - name: 'Run Azure webapp deploy action using publish profile credentials'
+         uses: azure/webapps-deploy@v2
+         id: app-web
+         with: 
+           app-name: '${{ secrets.RESOURCE_PREFIX }}-appservice' 
+           package: '${{ github.workspace }}//app'
+
+
+
+  deploy-hm-infra:
+    name: Deploy Infra HMG
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/appservice
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.TF_ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.TF_ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.TF_ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.TF_ARM_TENNANT_ID }}
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.STORAGE_CONNSTRING }}    
+      
+      
+    environment:
+      name: hmg
+    
+    needs: deploy-dev-infra
+    steps:
+      - name: Download Terraform
+        uses: actions/download-artifact@v2
+        with:
+          name: terraform
+          path: ${{ github.workspace }}//appservice
+          
+      - name: Download TF State
+        uses: azure/CLI@v1
+        with:
+          azcliversion: 2.0.72
+          inlineScript: |
+            az storage blob download-batch -d appservice --pattern terraform.tfstate -s ${{ secrets.CONTAINER_NAME }}     
+            
+      - uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -var "prefix=${{ secrets.RESOURCE_PREFIX }}" -lock=false
+        continue-on-error: true
+  
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -var "prefix=${{ secrets.RESOURCE_PREFIX }}" -lock=false
+  
+      - name: Upload TF State
+        uses: azure/CLI@v1
+        with:
+          azcliversion: 2.0.72
+          inlineScript: |
+            az storage blob upload-batch -d ${{ secrets.CONTAINER_NAME }} -s appservice --pattern *.tfstate
